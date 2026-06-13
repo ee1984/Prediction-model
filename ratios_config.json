@@ -1,0 +1,33 @@
+[
+  {
+    "name": "Debt / EBITDA",
+    "formula": "total_debt / ebitda",
+    "numerator": [{ "input": "total_debt", "multiplier": 1 }],
+    "denominator": [{ "input": "ebitda", "multiplier": 1 }],
+    "format": "multiple"
+  },
+  {
+    "name": "Net Debt / EBITDA",
+    "formula": "(total_debt - cash) / ebitda",
+    "numerator": [
+      { "input": "total_debt", "multiplier": 1 },
+      { "input": "cash", "multiplier": -1 }
+    ],
+    "denominator": [{ "input": "ebitda", "multiplier": 1 }],
+    "format": "multiple"
+  },
+  {
+    "name": "EBITDA / Interest Expense",
+    "formula": "ebitda / interest_expense",
+    "numerator": [{ "input": "ebitda", "multiplier": 1 }],
+    "denominator": [{ "input": "interest_expense", "multiplier": 1 }],
+    "format": "multiple"
+  },
+  {
+    "name": "EBITDA Margin",
+    "formula": "ebitda / revenue",
+    "numerator": [{ "input": "ebitda", "multiplier": 1 }],
+    "denominator": [{ "input": "revenue", "multiplier": 1 }],
+    "format": "percent"
+  }
+]
