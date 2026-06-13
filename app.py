@@ -28,6 +28,9 @@ class SecFactSuggestion:
     form: str | None
     fiscal_year: int | None
     end_date: str | None
+    unit: str | None = None
+    candidate_tags: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
 
     @property
     def source_label(self) -> str:
@@ -36,6 +39,14 @@ class SecFactSuggestion:
         if self.form:
             return f"Other form: {self.form}"
         return "Not available"
+
+    @property
+    def data_quality_label(self) -> str:
+        if self.form == "10-K":
+            return "Annual 10-K data"
+        if self.form:
+            return "Fallback form used"
+        return "No value available"
 
 
 @dataclass(frozen=True)
@@ -122,10 +133,15 @@ SEC_FACT_TAGS: dict[str, list[str]] = {
 }
 
 
-def _latest_fact_unit(fact: dict[str, Any]) -> dict[str, Any] | None:
-    """Pick the latest USD fact, preferring annual 10-K observations."""
-    usd_facts = fact.get("units", {}).get("USD", [])
-    if not usd_facts:
+def _available_units(fact: dict[str, Any]) -> list[str]:
+    """Return Company Facts units that contain at least one observation."""
+    return [unit for unit, observations in fact.get("units", {}).items() if observations]
+
+
+def _latest_fact_unit(fact: dict[str, Any], unit: str) -> dict[str, Any] | None:
+    """Pick the latest fact for a unit, preferring annual 10-K observations."""
+    unit_facts = fact.get("units", {}).get(unit, [])
+    if not unit_facts:
         return None
 
     def sort_key(item: dict[str, Any]) -> tuple[str, str]:
@@ -133,16 +149,48 @@ def _latest_fact_unit(fact: dict[str, Any]) -> dict[str, Any] | None:
 
     annual_facts = [
         item
-        for item in usd_facts
+        for item in unit_facts
         if item.get("form") == "10-K" and item.get("fp") == "FY" and item.get("val") is not None
     ]
     if annual_facts:
         return max(annual_facts, key=sort_key)
 
-    usable_facts = [item for item in usd_facts if item.get("val") is not None]
+    usable_facts = [item for item in unit_facts if item.get("val") is not None]
     if usable_facts:
         return max(usable_facts, key=sort_key)
     return None
+
+
+def _candidate_tag_names(us_gaap_facts: dict[str, Any], tags: list[str]) -> tuple[str, ...]:
+    """Return configured tags with usable SEC values."""
+    candidates = []
+    for tag in tags:
+        fact = us_gaap_facts.get(tag, {})
+        if any(_latest_fact_unit(fact, unit) is not None for unit in _available_units(fact)):
+            candidates.append(tag)
+    return tuple(candidates)
+
+
+def _warning_flags(field: str, suggestion: SecFactSuggestion) -> tuple[str, ...]:
+    """Build conservative data-quality warnings for SEC suggestions."""
+    warnings: list[str] = []
+    if suggestion.value is None:
+        warnings.append("No value available")
+    elif suggestion.form != "10-K":
+        warnings.append("Fallback form used")
+    if len(suggestion.candidate_tags) > 1:
+        warnings.append("Multiple candidate tags available")
+    if field == "total_debt" and suggestion.tag:
+        debt_tag_words = suggestion.tag.lower()
+        if "current" in debt_tag_words or "longterm" in debt_tag_words or "long_term" in debt_tag_words:
+            warnings.append("Debt tag may not represent total debt")
+    if field == "cash" and suggestion.tag and "restrictedcash" in suggestion.tag.lower():
+        warnings.append("Cash tag may include restricted cash")
+    if field == "capex":
+        warnings.append("Capex shown as positive cash outflow")
+        if suggestion.value is not None and suggestion.value < 0:
+            warnings.append("Capex SEC value uses an unusual negative sign convention")
+    return tuple(warnings)
 
 
 def sec_fact_suggestions(company_facts: dict[str, Any]) -> dict[str, SecFactSuggestion]:
@@ -150,9 +198,15 @@ def sec_fact_suggestions(company_facts: dict[str, Any]) -> dict[str, SecFactSugg
     us_gaap_facts = company_facts.get("facts", {}).get("us-gaap", {})
     suggestions: dict[str, SecFactSuggestion] = {}
     for field, tags in SEC_FACT_TAGS.items():
-        suggestion = SecFactSuggestion(field, None, None, None, None, None)
+        candidate_tags = _candidate_tag_names(us_gaap_facts, tags)
+        suggestion = SecFactSuggestion(
+            field, None, None, None, None, None, None, candidate_tags, ("No value available",)
+        )
         for tag in tags:
-            latest_fact = _latest_fact_unit(us_gaap_facts.get(tag, {}))
+            fact = us_gaap_facts.get(tag, {})
+            available_units = _available_units(fact)
+            selected_unit = "USD" if "USD" in available_units else next(iter(available_units), None)
+            latest_fact = _latest_fact_unit(fact, selected_unit) if selected_unit else None
             if latest_fact is not None:
                 suggestion = SecFactSuggestion(
                     field=field,
@@ -161,8 +215,21 @@ def sec_fact_suggestions(company_facts: dict[str, Any]) -> dict[str, SecFactSugg
                     form=str(latest_fact.get("form", "")) or None,
                     fiscal_year=latest_fact.get("fy"),
                     end_date=str(latest_fact.get("end", "")) or None,
+                    unit=selected_unit,
+                    candidate_tags=candidate_tags,
                 )
                 break
+        suggestion = SecFactSuggestion(
+            field=suggestion.field,
+            value=abs(suggestion.value) if field == "capex" and suggestion.value is not None else suggestion.value,
+            tag=suggestion.tag,
+            form=suggestion.form,
+            fiscal_year=suggestion.fiscal_year,
+            end_date=suggestion.end_date,
+            unit=suggestion.unit,
+            candidate_tags=suggestion.candidate_tags,
+            warnings=_warning_flags(field, suggestion),
+        )
         suggestions[field] = suggestion
     return suggestions
 
@@ -179,7 +246,8 @@ def render_sec_fact_suggestions(suggestions: dict[str, SecFactSuggestion]) -> No
     st.subheader("SEC Company Facts suggestions")
     st.caption(
         "Read-only suggestions from free SEC Company Facts endpoints. These values do not populate "
-        "the editable manual inputs and are not final audited outputs."
+        "the editable manual inputs and are not final audited outputs. EBITDA and total debt remain "
+        "manual for the ratio worksheet."
     )
     labels = {
         "revenue": "Revenue",
@@ -191,15 +259,23 @@ def render_sec_fact_suggestions(suggestions: dict[str, SecFactSuggestion]) -> No
     }
     rows = []
     for field, label in labels.items():
-        suggestion = suggestions.get(field, SecFactSuggestion(field, None, None, None, None, None))
+        suggestion = suggestions.get(
+            field,
+            SecFactSuggestion(field, None, None, None, None, None, None, (), ("No value available",)),
+        )
         rows.append(
             {
-                "Field": label,
+                "Internal field": field,
+                "Label": label,
                 "Suggested value": format_sec_value(suggestion.value),
                 "SEC tag": suggestion.tag or "Not available",
-                "Source": suggestion.source_label,
+                "Source form": suggestion.form or "Not available",
                 "Fiscal year": suggestion.fiscal_year or "Not available",
                 "Period end": suggestion.end_date or "Not available",
+                "Unit": suggestion.unit or "Not available",
+                "Annual/fallback": suggestion.data_quality_label,
+                "Quality flags": "; ".join(suggestion.warnings) or "Annual 10-K data",
+                "Candidate tags": ", ".join(suggestion.candidate_tags) or "Not available",
             }
         )
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
@@ -271,7 +347,7 @@ def ratio_values(inputs: dict[str, float | None]) -> dict[str, float | None]:
 
 
 def calculate_credit_ratios(inputs: dict[str, float | None]) -> dict[str, tuple[float | None, str]]:
-    """Prepare configurable credit rating agency-style ratio analysis metrics."""
+    """Prepare configurable basic credit ratio analysis metrics."""
     values = ratio_values(inputs)
     ratios: dict[str, tuple[float | None, str]] = {}
     for ratio in load_ratio_config():
@@ -313,7 +389,7 @@ def main() -> None:
     st.title("Financial Statement Analysis App")
     st.write(
         "Enter a U.S. public company ticker to retrieve recent SEC filing links and prepare "
-        "credit rating agency-style ratio analysis."
+        "a credit-analysis-style ratio worksheet."
     )
     st.caption(
         "This educational app uses free SEC data. It does not reproduce S&P Global Ratings' "
@@ -363,7 +439,7 @@ def main() -> None:
     st.divider()
     st.subheader("Simple credit ratio engine")
     st.write(
-        "Enter statement values manually to preview credit rating agency-style ratio analysis. "
+        "Enter statement values manually to preview basic credit ratio analysis. "
         "Use the same units for every field, such as USD millions. SEC extracted values are suggestions only."
     )
     st.caption(
