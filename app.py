@@ -13,8 +13,29 @@ import streamlit as st
 
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
+SEC_COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 SEC_ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_no}/{document}"
 RATIOS_CONFIG_PATH = Path(__file__).with_name("ratios_config.json")
+
+
+@dataclass(frozen=True)
+class SecFactSuggestion:
+    """Read-only SEC Company Facts value shown as a manual-input suggestion."""
+
+    field: str
+    value: float | None
+    tag: str | None
+    form: str | None
+    fiscal_year: int | None
+    end_date: str | None
+
+    @property
+    def source_label(self) -> str:
+        if self.form == "10-K":
+            return "Annual 10-K data"
+        if self.form:
+            return f"Other form: {self.form}"
+        return "Not available"
 
 
 @dataclass(frozen=True)
@@ -69,6 +90,119 @@ def load_recent_filings(cik: str, contact_email: str) -> pd.DataFrame:
     response.raise_for_status()
     filings = response.json().get("filings", {}).get("recent", {})
     return pd.DataFrame(filings)
+
+
+
+@st.cache_data(ttl=60 * 60)
+def load_company_facts(cik: str, contact_email: str) -> dict[str, Any]:
+    """Load free SEC Company Facts data for a company."""
+    response = requests.get(
+        SEC_COMPANY_FACTS_URL.format(cik=cik),
+        headers=sec_headers(contact_email),
+        timeout=20,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+SEC_FACT_TAGS: dict[str, list[str]] = {
+    "revenue": ["Revenues", "SalesRevenueNet"],
+    "cash": [
+        "CashAndCashEquivalentsAtCarryingValue",
+        "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+    ],
+    "total_debt": [
+        "LongTermDebtAndFinanceLeaseObligations",
+        "LongTermDebtAndFinanceLeaseObligationsCurrent",
+        "LongTermDebt",
+    ],
+    "interest_expense": ["InterestExpenseNonOperating", "InterestExpense"],
+    "operating_cash_flow": ["NetCashProvidedByUsedInOperatingActivities"],
+    "capex": ["PaymentsToAcquirePropertyPlantAndEquipment"],
+}
+
+
+def _latest_fact_unit(fact: dict[str, Any]) -> dict[str, Any] | None:
+    """Pick the latest USD fact, preferring annual 10-K observations."""
+    usd_facts = fact.get("units", {}).get("USD", [])
+    if not usd_facts:
+        return None
+
+    def sort_key(item: dict[str, Any]) -> tuple[str, str]:
+        return (str(item.get("end", "")), str(item.get("filed", "")))
+
+    annual_facts = [
+        item
+        for item in usd_facts
+        if item.get("form") == "10-K" and item.get("fp") == "FY" and item.get("val") is not None
+    ]
+    if annual_facts:
+        return max(annual_facts, key=sort_key)
+
+    usable_facts = [item for item in usd_facts if item.get("val") is not None]
+    if usable_facts:
+        return max(usable_facts, key=sort_key)
+    return None
+
+
+def sec_fact_suggestions(company_facts: dict[str, Any]) -> dict[str, SecFactSuggestion]:
+    """Extract read-only suggestions from SEC Company Facts without changing ratio inputs."""
+    us_gaap_facts = company_facts.get("facts", {}).get("us-gaap", {})
+    suggestions: dict[str, SecFactSuggestion] = {}
+    for field, tags in SEC_FACT_TAGS.items():
+        suggestion = SecFactSuggestion(field, None, None, None, None, None)
+        for tag in tags:
+            latest_fact = _latest_fact_unit(us_gaap_facts.get(tag, {}))
+            if latest_fact is not None:
+                suggestion = SecFactSuggestion(
+                    field=field,
+                    value=float(latest_fact["val"]),
+                    tag=tag,
+                    form=str(latest_fact.get("form", "")) or None,
+                    fiscal_year=latest_fact.get("fy"),
+                    end_date=str(latest_fact.get("end", "")) or None,
+                )
+                break
+        suggestions[field] = suggestion
+    return suggestions
+
+
+def format_sec_value(value: float | None) -> str:
+    """Format SEC Company Facts values for read-only suggestion display."""
+    if value is None:
+        return "Not available"
+    return f"{value:,.0f}"
+
+
+def render_sec_fact_suggestions(suggestions: dict[str, SecFactSuggestion]) -> None:
+    """Render read-only SEC Company Facts suggestions with tags and source forms."""
+    st.subheader("SEC Company Facts suggestions")
+    st.caption(
+        "Read-only suggestions from free SEC Company Facts endpoints. These values do not populate "
+        "the editable manual inputs and are not final audited outputs."
+    )
+    labels = {
+        "revenue": "Revenue",
+        "cash": "Cash",
+        "total_debt": "Total debt",
+        "interest_expense": "Interest expense",
+        "operating_cash_flow": "Operating cash flow",
+        "capex": "Capex",
+    }
+    rows = []
+    for field, label in labels.items():
+        suggestion = suggestions.get(field, SecFactSuggestion(field, None, None, None, None, None))
+        rows.append(
+            {
+                "Field": label,
+                "Suggested value": format_sec_value(suggestion.value),
+                "SEC tag": suggestion.tag or "Not available",
+                "Source": suggestion.source_label,
+                "Fiscal year": suggestion.fiscal_year or "Not available",
+                "Period end": suggestion.end_date or "Not available",
+            }
+        )
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
 
 def filing_url(company: Company, accession_number: str, primary_document: str) -> str:
@@ -213,6 +347,9 @@ def main() -> None:
                 render_latest_filing(company, latest_10k, "Latest 10-K")
                 render_latest_filing(company, latest_10q, "Latest 10-Q")
 
+                company_facts = load_company_facts(company.padded_cik, contact_email)
+                render_sec_fact_suggestions(sec_fact_suggestions(company_facts))
+
                 with st.expander("Show recent filings table"):
                     columns = ["filingDate", "reportDate", "form", "accessionNumber", "primaryDocument"]
                     existing_columns = [column for column in columns if column in filings.columns]
@@ -227,7 +364,7 @@ def main() -> None:
     st.subheader("Simple credit ratio engine")
     st.write(
         "Enter statement values manually to preview credit rating agency-style ratio analysis. "
-        "Use the same units for every field, such as USD millions. Values are not pulled from SEC filings."
+        "Use the same units for every field, such as USD millions. SEC extracted values are suggestions only."
     )
     st.caption(
         "Leave unknown fields as 0. Enter capital expenditures as a positive cash outflow; "
