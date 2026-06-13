@@ -18,6 +18,10 @@ This project does **not** use paid APIs. It does **not** reproduce S&P Global Ra
 - `requirements.txt` - Python dependencies.
 - `README.md` - Setup and usage instructions.
 
+## Configurable ratios
+
+Ratio definitions live in `ratios_config.json`, where each ratio names the input fields to divide and whether the result displays as a multiple or percent. This supports configurable credit rating agency-style ratio analysis without changing the SEC filing link functionality.
+
 ## How to run
 
 1. Create and activate a virtual environment:

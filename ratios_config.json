@@ -1,0 +1,34 @@
+{
+  "ratios": [
+    {
+      "name": "Debt / EBITDA",
+      "numerator": "total_debt",
+      "denominator": "ebitda",
+      "display": "multiple"
+    },
+    {
+      "name": "Net Debt / EBITDA",
+      "numerator": "net_debt",
+      "denominator": "ebitda",
+      "display": "multiple"
+    },
+    {
+      "name": "EBITDA / Interest Expense",
+      "numerator": "ebitda",
+      "denominator": "interest_expense",
+      "display": "multiple"
+    },
+    {
+      "name": "Free Cash Flow / Debt",
+      "numerator": "free_cash_flow",
+      "denominator": "total_debt",
+      "display": "percent"
+    },
+    {
+      "name": "EBITDA Margin",
+      "numerator": "ebitda",
+      "denominator": "revenue",
+      "display": "percent"
+    }
+  ]
+}

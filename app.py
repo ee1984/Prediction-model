@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -12,6 +14,7 @@ import streamlit as st
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 SEC_ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession_no}/{document}"
+RATIOS_CONFIG_PATH = Path(__file__).with_name("ratios_config.json")
 
 
 @dataclass(frozen=True)
@@ -112,31 +115,37 @@ def optional_input(value: float) -> float | None:
 
 # Manual ratio engine. This stays separate from SEC filing retrieval because the
 # app links to filings but does not parse audited statement values from them.
-def calculate_credit_ratios(inputs: dict[str, float | None]) -> dict[str, tuple[float | None, str]]:
-    """Prepare simple credit rating agency-style ratio analysis metrics."""
+def load_ratio_config() -> list[dict[str, str]]:
+    """Load ratio definitions from the local JSON config file."""
+    with RATIOS_CONFIG_PATH.open(encoding="utf-8") as config_file:
+        return json.load(config_file)["ratios"]
+
+
+def ratio_values(inputs: dict[str, float | None]) -> dict[str, float | None]:
+    """Prepare base and derived values used by configured ratios."""
     debt = inputs.get("total_debt")
     cash = inputs.get("cash") or 0
-    ebitda = inputs.get("ebitda")
-    interest = inputs.get("interest_expense")
-    revenue = inputs.get("revenue")
     operating_cash_flow = inputs.get("operating_cash_flow")
     capital_expenditures = inputs.get("capital_expenditures") or 0
 
-    free_cash_flow = None
-    if operating_cash_flow is not None:
-        free_cash_flow = operating_cash_flow - capital_expenditures
+    values = dict(inputs)
+    values["net_debt"] = debt - cash if debt is not None else None
+    values["free_cash_flow"] = (
+        operating_cash_flow - capital_expenditures if operating_cash_flow is not None else None
+    )
+    return values
 
-    net_debt = None
-    if debt is not None:
-        net_debt = debt - cash
 
-    return {
-        "Debt / EBITDA": (safe_ratio(debt, ebitda), "multiple"),
-        "Net Debt / EBITDA": (safe_ratio(net_debt, ebitda), "multiple"),
-        "EBITDA / Interest Expense": (safe_ratio(ebitda, interest), "multiple"),
-        "Free Cash Flow / Debt": (safe_ratio(free_cash_flow, debt), "percent"),
-        "EBITDA Margin": (safe_ratio(ebitda, revenue), "percent"),
-    }
+def calculate_credit_ratios(inputs: dict[str, float | None]) -> dict[str, tuple[float | None, str]]:
+    """Prepare configurable credit rating agency-style ratio analysis metrics."""
+    values = ratio_values(inputs)
+    ratios: dict[str, tuple[float | None, str]] = {}
+    for ratio in load_ratio_config():
+        ratios[ratio["name"]] = (
+            safe_ratio(values.get(ratio["numerator"]), values.get(ratio["denominator"])),
+            ratio.get("display", "multiple"),
+        )
+    return ratios
 
 
 def format_ratio(value: float | None, percent: bool = False) -> str:
